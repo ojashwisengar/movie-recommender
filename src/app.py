@@ -22,36 +22,28 @@ DATA_DIR = os.path.join(BASE_DIR, 'data')
 # ─── Load Data & Train Models ──────────────────────────────
 @st.cache_resource
 def load_models():
-    # Load CSVs
     movies = pd.read_csv(os.path.join(DATA_DIR, 'movies.csv'))
     ratings = pd.read_csv(os.path.join(DATA_DIR, 'ratings.csv'))
     popular_movies = pd.read_csv(os.path.join(DATA_DIR, 'popular_movies.csv'))
 
-    # ── Content Based: TF-IDF + Cosine Similarity ──
+    # Content Based — TF-IDF only, NO full cosine matrix
     movies['genres_clean'] = movies['genres'].str.replace('|', ' ', regex=False)
     tfidf = TfidfVectorizer(stop_words='english')
     tfidf_matrix = tfidf.fit_transform(movies['genres_clean'])
-    cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
     indices = pd.Series(movies.index, index=movies['title']).drop_duplicates()
 
-    # ── Collaborative: SVD using scipy ──
-    # Build user-item matrix
+    # Collaborative — SVD with smaller k to save memory
     user_item = ratings.pivot_table(
         index='userId', columns='movieId', values='rating'
     ).fillna(0)
 
-    # Store for later use
-    user_item_matrix = user_item.values
     user_ids = user_item.index.tolist()
     movie_ids = user_item.columns.tolist()
 
-    # SVD decomposition — k=50 latent factors
-    k = 50
-    sparse_matrix = csr_matrix(user_item_matrix, dtype=float)
-    U, sigma, Vt = svds(sparse_matrix, k=k)
+    sparse_matrix = csr_matrix(user_item.values, dtype=float)
+    U, sigma, Vt = svds(sparse_matrix, k=20)  # reduced from 50 to 20
     sigma = np.diag(sigma)
 
-    # Reconstruct predicted ratings matrix
     predicted_ratings = np.dot(np.dot(U, sigma), Vt)
     predicted_df = pd.DataFrame(
         predicted_ratings,
@@ -59,24 +51,29 @@ def load_models():
         columns=movie_ids
     )
 
-    return movies, ratings, popular_movies, cosine_sim, indices, predicted_df, movie_ids
+    # Return tfidf_matrix instead of cosine_sim
+    return movies, ratings, popular_movies, tfidf_matrix, indices, predicted_df, movie_ids
 
 # Load everything — shows spinner while training
 with st.spinner("🔄 Loading models... (first load takes ~30 seconds)"):
-    movies, ratings, popular_movies, cosine_sim, indices, predicted_df, movie_ids = load_models()
+    movies, ratings, popular_movies, tfidf_matrix, indices, predicted_df, movie_ids = load_models()
 
 # ─── Helper Functions ──────────────────────────────────────
 def get_content_scores(title, top_n=50):
     if title not in indices:
         return None
     idx = indices[title]
-    sim_scores = list(enumerate(cosine_sim[idx]))
-    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
-    sim_scores = sim_scores[1:top_n+1]
-    movie_indices = [i[0] for i in sim_scores]
-    similarity_scores = [i[1] for i in sim_scores]
-    result = movies.iloc[movie_indices][['movieId', 'title', 'genres']].copy()
-    result['content_score'] = similarity_scores
+    
+    # Calculate similarity only for this one movie — saves memory!
+    movie_vec = tfidf_matrix[idx]
+    sim_scores = cosine_similarity(movie_vec, tfidf_matrix).flatten()
+    
+    # Get top matches
+    similar_indices = sim_scores.argsort()[::-1][1:top_n+1]
+    similar_scores = sim_scores[similar_indices]
+    
+    result = movies.iloc[similar_indices][['movieId', 'title', 'genres']].copy()
+    result['content_score'] = similar_scores
     return result
 
 def get_collab_score(user_id, movie_id):
