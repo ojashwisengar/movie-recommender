@@ -2,13 +2,11 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import pickle
-from sklearn.metrics.pairwise import cosine_similarity
-
 import os
-
-# Fix path issue — works from any directory
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, 'data')
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import TfidfVectorizer
+from scipy.sparse.linalg import svds
+from scipy.sparse import csr_matrix
 
 # ─── Page Config ───────────────────────────────────────────
 st.set_page_config(
@@ -17,25 +15,55 @@ st.set_page_config(
     layout="wide"
 )
 
-# ─── Load Data & Models ────────────────────────────────────
+# ─── Path Setup ────────────────────────────────────────────
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.path.join(BASE_DIR, 'data')
+
+# ─── Load Data & Train Models ──────────────────────────────
 @st.cache_resource
 def load_models():
+    # Load CSVs
     movies = pd.read_csv(os.path.join(DATA_DIR, 'movies.csv'))
     ratings = pd.read_csv(os.path.join(DATA_DIR, 'ratings.csv'))
     popular_movies = pd.read_csv(os.path.join(DATA_DIR, 'popular_movies.csv'))
 
-    with open(os.path.join(DATA_DIR, 'svd_model.pkl'), 'rb') as f:
-        svd_model = pickle.load(f)
+    # ── Content Based: TF-IDF + Cosine Similarity ──
+    movies['genres_clean'] = movies['genres'].str.replace('|', ' ', regex=False)
+    tfidf = TfidfVectorizer(stop_words='english')
+    tfidf_matrix = tfidf.fit_transform(movies['genres_clean'])
+    cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
+    indices = pd.Series(movies.index, index=movies['title']).drop_duplicates()
 
-    with open(os.path.join(DATA_DIR, 'cosine_sim.pkl'), 'rb') as f:
-        cosine_sim = pickle.load(f)
+    # ── Collaborative: SVD using scipy ──
+    # Build user-item matrix
+    user_item = ratings.pivot_table(
+        index='userId', columns='movieId', values='rating'
+    ).fillna(0)
 
-    indices = pd.read_csv(os.path.join(DATA_DIR, 'movie_indices.csv'), 
-                          index_col=0).squeeze()
+    # Store for later use
+    user_item_matrix = user_item.values
+    user_ids = user_item.index.tolist()
+    movie_ids = user_item.columns.tolist()
 
-    return movies, ratings, popular_movies, svd_model, cosine_sim, indices
+    # SVD decomposition — k=50 latent factors
+    k = 50
+    sparse_matrix = csr_matrix(user_item_matrix, dtype=float)
+    U, sigma, Vt = svds(sparse_matrix, k=k)
+    sigma = np.diag(sigma)
 
-movies, ratings, popular_movies, svd_model, cosine_sim, indices = load_models()
+    # Reconstruct predicted ratings matrix
+    predicted_ratings = np.dot(np.dot(U, sigma), Vt)
+    predicted_df = pd.DataFrame(
+        predicted_ratings,
+        index=user_ids,
+        columns=movie_ids
+    )
+
+    return movies, ratings, popular_movies, cosine_sim, indices, predicted_df, movie_ids
+
+# Load everything — shows spinner while training
+with st.spinner("🔄 Loading models... (first load takes ~30 seconds)"):
+    movies, ratings, popular_movies, cosine_sim, indices, predicted_df, movie_ids = load_models()
 
 # ─── Helper Functions ──────────────────────────────────────
 def get_content_scores(title, top_n=50):
@@ -50,6 +78,13 @@ def get_content_scores(title, top_n=50):
     result = movies.iloc[movie_indices][['movieId', 'title', 'genres']].copy()
     result['content_score'] = similarity_scores
     return result
+
+def get_collab_score(user_id, movie_id):
+    if user_id not in predicted_df.index:
+        return 3.5  # default average
+    if movie_id not in predicted_df.columns:
+        return 3.5
+    return predicted_df.loc[user_id, movie_id]
 
 def hybrid_recommendations(user_id=None, title=None, top_n=10):
     # Case 4: No input → Popularity
@@ -73,15 +108,16 @@ def hybrid_recommendations(user_id=None, title=None, top_n=10):
 
     # Case 3: Only user_id → Collaborative
     if user_id is not None and title is None:
+        if user_id not in predicted_df.index:
+            st.warning("User ID not found. Showing popular movies instead.")
+            return popular_movies[['title', 'genres', 'weighted_score']].head(top_n)
+
         rated_movies = ratings[ratings['userId'] == user_id]['movieId'].tolist()
-        all_movie_ids = movies['movieId'].tolist()
-        unseen = [m for m in all_movie_ids if m not in rated_movies]
-        preds = []
-        for movie_id in unseen:
-            pred = svd_model.predict(user_id, movie_id)
-            preds.append({'movieId': movie_id, 'predicted_rating': round(pred.est, 3)})
-        pred_df = pd.DataFrame(preds).sort_values('predicted_rating', ascending=False)
-        result = pred_df.merge(movies, on='movieId')
+        user_preds = predicted_df.loc[user_id]
+        user_preds = user_preds[~user_preds.index.isin(rated_movies)]
+        top_movies = user_preds.sort_values(ascending=False).head(top_n)
+        result = pd.DataFrame({'movieId': top_movies.index, 'predicted_rating': top_movies.values})
+        result = result.merge(movies, on='movieId')
         return result[['title', 'genres', 'predicted_rating']].head(top_n)
 
     # Case 1: Both → Full Hybrid
@@ -91,8 +127,8 @@ def hybrid_recommendations(user_id=None, title=None, top_n=10):
 
     collab_scores = []
     for _, row in content_recs.iterrows():
-        pred = svd_model.predict(user_id, row['movieId'])
-        collab_scores.append(round(pred.est, 3))
+        score = get_collab_score(user_id, row['movieId'])
+        collab_scores.append(round(score, 3))
 
     content_recs['collab_score'] = collab_scores
 
@@ -130,18 +166,13 @@ top_n = st.sidebar.slider("Number of recommendations", 5, 20, 10)
 
 # Main inputs
 col1, col2 = st.columns(2)
-
 with col1:
     movie_list = ["None"] + sorted(movies['title'].tolist())
     selected_movie = st.selectbox("🎬 Select a Movie (optional)", movie_list)
-
 with col2:
     user_id_input = st.text_input("👤 Enter User ID (1-610, optional)", value="")
 
-# Get recommendations button
 if st.button("🚀 Get Recommendations", type="primary"):
-
-    # Parse inputs
     title = None if selected_movie == "None" else selected_movie
     user_id = None
     if user_id_input.strip() != "":
@@ -154,7 +185,6 @@ if st.button("🚀 Get Recommendations", type="primary"):
             st.error("Please enter a valid number for User ID")
             st.stop()
 
-    # Show which mode we're in
     if user_id and title:
         st.success(f"🔥 Full Hybrid Mode — User {user_id} + {title}")
     elif title:
@@ -164,7 +194,6 @@ if st.button("🚀 Get Recommendations", type="primary"):
     else:
         st.info("⭐ Showing Most Popular Movies")
 
-    # Get recommendations
     with st.spinner("Finding recommendations..."):
         results = hybrid_recommendations(user_id=user_id, title=title, top_n=top_n)
 
@@ -172,24 +201,17 @@ if st.button("🚀 Get Recommendations", type="primary"):
         st.error("Movie not found. Please try another title.")
     else:
         st.markdown(f"### 🎯 Top {top_n} Recommendations")
-
-        # Display as cards
         for i, (_, row) in enumerate(results.iterrows()):
             with st.container():
                 col_num, col_title, col_genre, col_score = st.columns([0.5, 3, 3, 1.5])
-
                 with col_num:
                     st.markdown(f"**#{i+1}**")
-
                 with col_title:
                     st.markdown(f"**{row['title']}**")
-
                 with col_genre:
                     genres = row['genres'].replace('|', ' · ')
                     st.caption(genres)
-
                 with col_score:
-                    # Show whichever score column exists
                     if 'hybrid_score' in row:
                         st.metric("Hybrid", f"{row['hybrid_score']:.2f}")
                     elif 'predicted_rating' in row:
@@ -198,10 +220,8 @@ if st.button("🚀 Get Recommendations", type="primary"):
                         st.metric("Similarity", f"{row['content_score']:.2f}")
                     elif 'weighted_score' in row:
                         st.metric("Score", f"{row['weighted_score']:.2f}")
-
                 st.markdown("---")
 
-# Footer
 st.markdown("---")
 st.markdown(
     "Built with ❤️ using MovieLens dataset | "

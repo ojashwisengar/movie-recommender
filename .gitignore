@@ -9,7 +9,7 @@ __pycache__/
 # Jupyter checkpoints
 .ipynb_checkpoints/
 
-# Large model files
+#Large files
 data/cosine_sim.pkl
 data/svd_model.pkl
 

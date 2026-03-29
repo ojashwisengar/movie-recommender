@@ -1,7 +1,10 @@
+
+## requirements.txt — final version
+
 pandas
 numpy
 scikit-learn
 streamlit
 matplotlib
 seaborn
-joblib
+scipy
