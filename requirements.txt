@@ -4,7 +4,7 @@
 pandas
 numpy
 scikit-learn
-streamlit
+streamlit==1.35.0
 matplotlib
 seaborn
 scipy
