@@ -1,0 +1,25 @@
+When I first opened terminal there was no file no folder for this project. I will tell you exactly what I did:
+
+Just I have to install python only then it will work.
+
+mkdir movie-recommender
+
+cd movie-recommender
+
+python -m venv venv
+
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+venv\Scripts\activate
+
+pip install pandas numpy scikit-learn scikit-surprise streamlit jupyter matplotlib seaborn
+
+To save dependencies:
+pip freeze > requirements.txt
+
+Create folder structure:
+mkdir data
+mkdir notebooks
+mkdir src
+
+pip freeze > requirements.txt
