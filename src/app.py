@@ -220,7 +220,4 @@ if st.button("🚀 Get Recommendations", type="primary"):
                 st.markdown("---")
 
 st.markdown("---")
-st.markdown(
-    "Built with ❤️ using MovieLens dataset | "
-    "Models: SVD Collaborative Filtering + TF-IDF Content-Based"
-)
+
